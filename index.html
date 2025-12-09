@@ -51,8 +51,8 @@
   // =========================
   // Firebase SDK 로드
   // =========================
-  import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
-  import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+import { initializeFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
 
  const firebaseConfig = {
   apiKey: "AIzaSyAfSyPcyzdZ3jKsGfH7WNeXCFkixtMJ634",
@@ -65,7 +65,10 @@
 };
 
   const fbApp = initializeApp(firebaseConfig);
-  const db = getFirestore(fbApp);
+  const db = initializeFirestore(fbApp, {
+  experimentalForceLongPolling: true,
+  useFetchStreams: false
+});
 
   // =========================
   // 전역 상태
@@ -1354,3 +1357,4 @@
 </script>
 </body>
 </html>
+
