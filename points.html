@@ -1,0 +1,1357 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>학급 상점·벌점 관리 앱 (Firestore 버전)</title>
+  <style>
+    body { font-family: sans-serif; margin: 0; padding: 0; background: #f5f5f5; }
+    header { background: #3f51b5; color: #fff; padding: 10px 16px; }
+    header h1 { margin: 0; font-size: 18px; }
+    #container { padding: 16px; }
+    .card { background: #fff; border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    label { display: block; margin-top: 6px; font-size: 13px; }
+    input, select, button, textarea {
+      margin-top: 4px;
+      padding: 6px;
+      font-size: 13px;
+    }
+    button { cursor: pointer; }
+    .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .row > * { flex: 1; min-width: 120px; }
+    .nav { margin-bottom: 12px; }
+    .nav button { margin-right: 6px; margin-bottom: 6px; }
+    table { border-collapse: collapse; width: 100%; font-size: 12px; }
+    th, td { border: 1px solid #ddd; padding: 4px 6px; text-align: left; }
+    th { background: #eceff1; }
+    .badge { display:inline-block; padding:2px 6px; border-radius:4px; font-size:11px; }
+    .badge-pending { background:#ffecb3; }
+    .badge-approved { background:#c8e6c9; }
+    .badge-rejected { background:#ffcdd2; }
+    .tag { font-size:11px; color:#555; }
+    .danger { color:#c62828; }
+    .success { color:#2e7d32; }
+    .info { color:#1565c0; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>학급 상점·벌점 관리 앱 (Firestore 버전)</h1>
+</header>
+<div id="container">
+  <div id="loginView" class="card"></div>
+  <div id="appView" style="display:none;">
+    <div id="userBar" class="card"></div>
+    <div id="navBar" class="card nav"></div>
+    <div id="content"></div>
+  </div>
+</div>
+
+<!-- 여기부터 Firebase + 앱 코드 -->
+<script type="module">
+  // =========================
+  // Firebase SDK 로드
+  // =========================
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/11.0.0/firebase-firestore.js";
+
+  // TODO: Firebase 콘솔에서 복사해서 채워넣기
+const firebaseConfig = {
+  apiKey: "AIzaSyAfSyPcyzdZ3jKsGfH7WNeXCFkixtMJ634",
+  authDomain: "class-point-app.firebaseapp.com",
+  projectId: "class-point-app",
+  storageBucket: "class-point-app.firebasestorage.app",
+  messagingSenderId: "448624840262",
+  appId: "1:448624840262:web:6740513e7cf52a0eb5c447",
+  measurementId: "G-LS4EJPN16R"
+};
+
+  const fbApp = initializeApp(firebaseConfig);
+  const db = getFirestore(fbApp);
+
+  // =========================
+  // 전역 상태
+  // =========================
+  let appData = {};
+  let currentUser = null; // { role: 'teacher'|'student', classId?, studentId? }
+
+  // =========================
+  // 공통 유틸
+  // =========================
+  function randomId(len = 6) {
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let out = "";
+    for (let i = 0; i < len; i++) {
+      out += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return out;
+  }
+
+  function findClassById(classId) {
+    return (appData.classes || []).find(c => c.id === classId);
+  }
+
+  function formatDateTime(ts) {
+    const d = new Date(ts);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")} ${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+  }
+
+  // =========================
+  // Firestore 저장/불러오기
+  // =========================
+  async function loadData() {
+    const ref = doc(db, "meta", "appData");
+    const snap = await getDoc(ref);
+    if (snap.exists()) {
+      appData = snap.data();
+      // 혹시 필드가 없을 때를 대비한 기본값 보정
+      appData.teacherPassword ??= "teacher1234";
+      appData.classes ??= [];
+    } else {
+      appData = {
+        teacherPassword: "teacher1234",
+        classes: []
+      };
+      await setDoc(ref, appData);
+    }
+  }
+
+  // Firestore에 전체 상태 저장
+  async function saveData() {
+    const ref = doc(db, "meta", "appData");
+    try {
+      await setDoc(ref, appData);
+    } catch (e) {
+      console.error("데이터 저장 실패:", e);
+    }
+  }
+
+  // =========================
+  // 초기 진입: 데이터 불러온 뒤 로그인 화면 렌더
+  // =========================
+  document.addEventListener("DOMContentLoaded", async () => {
+    const loginView = document.getElementById("loginView");
+    loginView.innerHTML = "<h2>데이터 불러오는 중...</h2><p class='tag'>잠시만 기다려 주세요.</p>";
+
+    try {
+      await loadData();
+      renderLoginView();
+    } catch (e) {
+      console.error(e);
+      loginView.innerHTML = "<p class='danger'>데이터를 불러오지 못했습니다. 인터넷 연결과 Firebase 설정을 확인하세요.</p>";
+    }
+  });
+
+  // =========================
+  // 로그인 화면
+  // =========================
+  function renderLoginView(message = "") {
+    const el = document.getElementById("loginView");
+    const classOptions = (appData.classes || []).map(c => `<option value="${c.id}">${c.name} (${c.id})</option>`).join("");
+    el.innerHTML = `
+      <h2>로그인</h2>
+      ${message ? `<p class="danger">${message}</p>` : ""}
+      <div class="card" style="margin-top:8px;">
+        <h3>교사용 로그인</h3>
+        <label>교사 비밀번호(기본: teacher1234)
+          <input type="password" id="teacherPasswordInput" />
+        </label>
+        <button id="teacherLoginBtn">교사 로그인</button>
+      </div>
+      <div class="card" style="margin-top:8px;">
+        <h3>학생용 로그인</h3>
+        <label>학급 선택
+          <select id="studentClassSelect">
+            <option value="">-- 학급 선택 --</option>
+            ${classOptions}
+          </select>
+        </label>
+        <label>학생 아이디
+          <input type="text" id="studentIdInput" />
+        </label>
+        <label>비밀번호
+          <input type="password" id="studentPwInput" />
+        </label>
+        <button id="studentLoginBtn">학생 로그인</button>
+      </div>
+      <p class="tag info">※ 처음 사용하는 경우, 먼저 교사로 로그인해서 학급과 학생을 생성하세요.</p>
+    `;
+
+    document.getElementById("teacherLoginBtn").onclick = () => {
+      const pw = document.getElementById("teacherPasswordInput").value.trim();
+      if (pw === appData.teacherPassword) {
+        currentUser = { role: "teacher" };
+        document.getElementById("loginView").style.display = "none";
+        document.getElementById("appView").style.display = "block";
+        renderTeacherApp();
+      } else {
+        renderLoginView("교사 비밀번호가 올바르지 않습니다.");
+      }
+    };
+
+    document.getElementById("studentLoginBtn").onclick = () => {
+      const classId = document.getElementById("studentClassSelect").value;
+      const studentId = document.getElementById("studentIdInput").value.trim();
+      const pw = document.getElementById("studentPwInput").value.trim();
+      const cls = findClassById(classId);
+      if (!cls) {
+        renderLoginView("학급을 선택하세요.");
+        return;
+      }
+      const stu = (cls.students || []).find(s => s.id === studentId && s.password === pw);
+      if (!stu) {
+        renderLoginView("아이디 또는 비밀번호가 올바르지 않습니다.");
+        return;
+      }
+      currentUser = { role: "student", classId, studentId };
+      document.getElementById("loginView").style.display = "none";
+      document.getElementById("appView").style.display = "block";
+      renderStudentApp();
+    };
+  }
+
+  // =========================
+  // 교사용 앱
+  // =========================
+  function renderTeacherApp(activeTab = "class") {
+    const userBar = document.getElementById("userBar");
+    userBar.innerHTML = `
+      <div class="row">
+        <div><strong>역할:</strong> 교사</div>
+        <div><span class="tag">학급 수: ${(appData.classes || []).length}</span></div>
+        <div style="text-align:right;">
+          <button id="logoutBtn">로그아웃</button>
+        </div>
+      </div>
+    `;
+    document.getElementById("logoutBtn").onclick = () => {
+      currentUser = null;
+      document.getElementById("appView").style.display = "none";
+      document.getElementById("loginView").style.display = "block";
+      renderLoginView();
+    };
+
+    const navBar = document.getElementById("navBar");
+    navBar.innerHTML = `
+      <button data-tab="class"${activeTab==="class"?" style='font-weight:bold;'":""}>학급 관리</button>
+      <button data-tab="rules"${activeTab==="rules"?" style='font-weight:bold;'":""}>상점·벌점 항목</button>
+      <button data-tab="store"${activeTab==="store"?" style='font-weight:bold;'":""}>스토어 관리</button>
+      <button data-tab="requests"${activeTab==="requests"?" style='font-weight:bold;'":""}>요청 승인</button>
+      <button data-tab="stats"${activeTab==="stats"?" style='font-weight:bold;'":""}>통계·로그</button>
+    `;
+    Array.from(navBar.querySelectorAll("button")).forEach(btn => {
+      btn.onclick = () => {
+        renderTeacherApp(btn.dataset.tab);
+      };
+    });
+
+    if (activeTab === "class") renderTeacherClassManage();
+    else if (activeTab === "rules") renderTeacherRulesManage();
+    else if (activeTab === "store") renderTeacherStoreManage();
+    else if (activeTab === "requests") renderTeacherRequests();
+    else if (activeTab === "stats") renderTeacherStats();
+  }
+
+  // ----- 교사: 학급 관리 -----
+  function renderTeacherClassManage() {
+    const content = document.getElementById("content");
+    const classOptions = (appData.classes || []).map(c => `<option value="${c.id}">${c.name} (${c.id})</option>`).join("");
+    content.innerHTML = `
+      <div class="card">
+        <h3>학급 생성</h3>
+        <div class="row">
+          <div>
+            <label>학급 ID (예: 5-1)
+              <input type="text" id="newClassId" placeholder="5-1" />
+            </label>
+          </div>
+          <div>
+            <label>학급 이름
+              <input type="text" id="newClassName" placeholder="5학년 1반" />
+            </label>
+          </div>
+          <div style="flex:0;">
+            <button id="createClassBtn">학급 추가</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h3>학급 선택 및 학생 관리</h3>
+        <label>학급 선택
+          <select id="manageClassSelect">
+            <option value="">-- 학급 선택 --</option>
+            ${classOptions}
+          </select>
+        </label>
+        <div id="classDetailArea" style="margin-top:10px;"></div>
+      </div>
+    `;
+    document.getElementById("createClassBtn").onclick = async () => {
+      const id = document.getElementById("newClassId").value.trim();
+      const name = document.getElementById("newClassName").value.trim() || id;
+      if (!id) { alert("학급 ID를 입력하세요."); return; }
+      if (findClassById(id)) { alert("이미 존재하는 학급 ID입니다."); return; }
+      appData.classes.push({
+        id,
+        name,
+        students: [],
+        rules: [],
+        penalties: [],
+        storeItems: [],
+        pointRequests: [],
+        storeRequests: [],
+        logs: []
+      });
+      await saveData();
+      renderTeacherApp("class");
+    };
+
+    document.getElementById("manageClassSelect").onchange = () => {
+      const classId = document.getElementById("manageClassSelect").value;
+      renderClassDetail(classId);
+    };
+  }
+
+  async function renderClassDetail(classId) {
+    const area = document.getElementById("classDetailArea");
+    if (!classId) { area.innerHTML = ""; return; }
+    const cls = findClassById(classId);
+    if (!cls) { area.innerHTML = "<p>학급을 찾을 수 없습니다.</p>"; return; }
+
+    cls.students ??= [];
+
+    const studentRows = cls.students.map(s => `
+      <tr>
+        <td>${s.name}</td>
+        <td>${s.id}</td>
+        <td>${s.password}</td>
+        <td>${s.points || 0}</td>
+        <td>
+          ${s.isPointManager ? '<span class="badge info">상점관리자</span>' : ''}
+          ${s.isAnnounceManager ? '<span class="badge info">발표관리</span>' : ''}
+          ${s.isGlobalRequester ? '<span class="badge info">전체요청가능</span>' : ''}
+        </td>
+        <td>
+          <button data-sid="${s.id}" class="togglePMBtn">${s.isPointManager ? '해제' : '지정'}</button>
+          <button data-sid="${s.id}" class="toggleAMBtn">${s.isAnnounceManager ? '해제' : '지정'}</button>
+          <button data-sid="${s.id}" class="toggleGRBtn">${s.isGlobalRequester ? '해제' : '지정'}</button>
+          <button data-sid="${s.id}" class="delStuBtn">삭제</button>
+        </td>
+      </tr>
+    `).join("");
+
+    area.innerHTML = `
+      <div class="card">
+        <h4>${cls.name} (${cls.id}) 학생 관리</h4>
+        <div class="row">
+          <div>
+            <label>학생 이름
+              <input type="text" id="newStuName" placeholder="홍길동" />
+            </label>
+          </div>
+          <div style="flex:0;">
+            <button id="addStuBtn">학생 추가 (아이디/비번 자동 생성)</button>
+          </div>
+        </div>
+        <p class="tag">※ 아이디/비밀번호는 알파벳 랜덤으로 생성됩니다. 학생에게 개별 안내하세요.</p>
+        <table style="margin-top:10px;">
+          <thead>
+            <tr>
+              <th>이름</th>
+              <th>아이디</th>
+              <th>비밀번호</th>
+              <th>현재 상점</th>
+              <th>역할</th>
+              <th>관리</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${studentRows || '<tr><td colspan="6">등록된 학생이 없습니다.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+    `;
+
+    document.getElementById("addStuBtn").onclick = async () => {
+      const name = document.getElementById("newStuName").value.trim();
+      if (!name) { alert("학생 이름을 입력하세요."); return; }
+      const id = randomId(6);
+      const pw = randomId(6);
+      cls.students.push({
+        id,
+        name,
+        password: pw,
+        points: 0,
+        isPointManager: false,
+        isAnnounceManager: false,
+        isGlobalRequester: false
+      });
+      await saveData();
+      renderClassDetail(classId);
+    };
+
+    area.querySelectorAll(".togglePMBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const sid = btn.dataset.sid;
+        const stu = cls.students.find(s => s.id === sid);
+        stu.isPointManager = !stu.isPointManager;
+        await saveData();
+        renderClassDetail(classId);
+      };
+    });
+    area.querySelectorAll(".toggleAMBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const sid = btn.dataset.sid;
+        const stu = cls.students.find(s => s.id === sid);
+        stu.isAnnounceManager = !stu.isAnnounceManager;
+        await saveData();
+        renderClassDetail(classId);
+      };
+    });
+    area.querySelectorAll(".toggleGRBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const sid = btn.dataset.sid;
+        const stu = cls.students.find(s => s.id === sid);
+        stu.isGlobalRequester = !stu.isGlobalRequester;
+        await saveData();
+        renderClassDetail(classId);
+      };
+    });
+    area.querySelectorAll(".delStuBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const sid = btn.dataset.sid;
+        if (!confirm("정말 이 학생을 삭제할까요?")) return;
+        cls.students = cls.students.filter(s => s.id !== sid);
+        await saveData();
+        renderClassDetail(classId);
+      };
+    });
+  }
+
+  // ----- 교사: 상점·벌점 항목 -----
+  function renderTeacherRulesManage() {
+    const content = document.getElementById("content");
+    const classOptions = (appData.classes || []).map(c => `<option value="${c.id}">${c.name} (${c.id})</option>`).join("");
+    content.innerHTML = `
+      <div class="card">
+        <h3>学급 선택</h3>
+        <label>학급
+          <select id="rulesClassSelect">
+            <option value="">-- 학급 선택 --</option>
+            ${classOptions}
+          </select>
+        </label>
+        <div id="rulesDetailArea" style="margin-top:10px;"></div>
+      </div>
+    `;
+    document.getElementById("rulesClassSelect").onchange = () => {
+      const classId = document.getElementById("rulesClassSelect").value;
+      renderRulesDetail(classId);
+    };
+  }
+
+  async function renderRulesDetail(classId) {
+    const area = document.getElementById("rulesDetailArea");
+    if (!classId) { area.innerHTML = ""; return; }
+    const cls = findClassById(classId);
+    if (!cls) { area.innerHTML = "<p>학급을 찾을 수 없습니다.</p>"; return; }
+
+    cls.rules ??= [];
+    cls.penalties ??= [];
+
+    const rewardRows = cls.rules.map((r, idx) => `
+      <tr>
+        <td>${r.name}</td>
+        <td>${r.points}</td>
+        <td><button data-idx="${idx}" class="delRewardBtn">삭제</button></td>
+      </tr>
+    `).join("");
+
+    const penaltyRows = cls.penalties.map((r, idx) => `
+      <tr>
+        <td>${r.name}</td>
+        <td>${r.points}</td>
+        <td><button data-idx="${idx}" class="delPenaltyBtn">삭제</button></td>
+      </tr>
+    `).join("");
+
+    area.innerHTML = `
+      <div class="card">
+        <h4>상점 항목</h4>
+        <div class="row">
+          <div>
+            <label>항목 이름
+              <input type="text" id="rewardName" placeholder="과제 성실" />
+            </label>
+          </div>
+          <div>
+            <label>점수(+)
+              <input type="number" id="rewardPoints" value="1" />
+            </label>
+          </div>
+          <div style="flex:0;">
+            <button id="addRewardBtn">상점 항목 추가</button>
+          </div>
+        </div>
+        <table style="margin-top:10px;">
+          <thead><tr><th>이름</th><th>점수</th><th>관리</th></tr></thead>
+          <tbody>${rewardRows || '<tr><td colspan="3">등록된 상점 항목이 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h4>벌점 항목</h4>
+        <div class="row">
+          <div>
+            <label>항목 이름
+              <input type="text" id="penaltyName" placeholder="지각" />
+            </label>
+          </div>
+          <div>
+            <label>점수(-)
+              <input type="number" id="penaltyPoints" value="-1" />
+            </label>
+          </div>
+          <div style="flex:0;">
+            <button id="addPenaltyBtn">벌점 항목 추가</button>
+          </div>
+        </div>
+        <table style="margin-top:10px;">
+          <thead><tr><th>이름</th><th>점수</th><th>관리</th></tr></thead>
+          <tbody>${penaltyRows || '<tr><td colspan="3">등록된 벌점 항목이 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+    `;
+
+    document.getElementById("addRewardBtn").onclick = async () => {
+      const name = document.getElementById("rewardName").value.trim();
+      const pts = Number(document.getElementById("rewardPoints").value || "0");
+      if (!name) { alert("이름을 입력하세요."); return; }
+      cls.rules.push({ id: randomId(6), name, points: pts });
+      await saveData();
+      renderRulesDetail(classId);
+    };
+
+    document.getElementById("addPenaltyBtn").onclick = async () => {
+      const name = document.getElementById("penaltyName").value.trim();
+      const pts = Number(document.getElementById("penaltyPoints").value || "0");
+      if (!name) { alert("이름을 입력하세요."); return; }
+      cls.penalties.push({ id: randomId(6), name, points: pts });
+      await saveData();
+      renderRulesDetail(classId);
+    };
+
+    area.querySelectorAll(".delRewardBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const idx = Number(btn.dataset.idx);
+        cls.rules.splice(idx, 1);
+        await saveData();
+        renderRulesDetail(classId);
+      };
+    });
+    area.querySelectorAll(".delPenaltyBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const idx = Number(btn.dataset.idx);
+        cls.penalties.splice(idx, 1);
+        await saveData();
+        renderRulesDetail(classId);
+      };
+    });
+  }
+
+  // ----- 교사: 스토어 -----
+  function renderTeacherStoreManage() {
+    const content = document.getElementById("content");
+    const classOptions = (appData.classes || []).map(c => `<option value="${c.id}">${c.name} (${c.id})</option>`).join("");
+    content.innerHTML = `
+      <div class="card">
+        <h3>학급 선택</h3>
+        <label>학급
+          <select id="storeClassSelect">
+            <option value="">-- 학급 선택 --</option>
+            ${classOptions}
+          </select>
+        </label>
+        <div id="storeDetailArea" style="margin-top:10px;"></div>
+      </div>
+    `;
+    document.getElementById("storeClassSelect").onchange = () => {
+      const classId = document.getElementById("storeClassSelect").value;
+      renderStoreDetail(classId);
+    };
+  }
+
+  async function renderStoreDetail(classId) {
+    const area = document.getElementById("storeDetailArea");
+    if (!classId) { area.innerHTML = ""; return; }
+    const cls = findClassById(classId);
+    if (!cls) { area.innerHTML = "<p>학급을 찾을 수 없습니다.</p>"; return; }
+
+    cls.storeItems ??= [];
+
+    const rows = cls.storeItems.map((it, idx) => `
+      <tr>
+        <td>${it.name}</td>
+        <td>${it.cost}</td>
+        <td>${it.description || ""}</td>
+        <td><button data-idx="${idx}" class="delItemBtn">삭제</button></td>
+      </tr>
+    `).join("");
+
+    area.innerHTML = `
+      <div class="card">
+        <h4>스토어 상품</h4>
+        <div class="row">
+          <div>
+            <label>상품 이름
+              <input type="text" id="itemName" placeholder="자리 선택권" />
+            </label>
+          </div>
+          <div>
+            <label>가격(상점)
+              <input type="number" id="itemCost" value="10" />
+            </label>
+          </div>
+          <div>
+            <label>설명(선택)
+              <input type="text" id="itemDesc" placeholder="예: 1교시 자리 선택" />
+            </label>
+          </div>
+          <div style="flex:0;">
+            <button id="addItemBtn">상품 추가</button>
+          </div>
+        </div>
+        <table style="margin-top:10px;">
+          <thead><tr><th>상품</th><th>가격</th><th>설명</th><th>관리</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="4">등록된 상품이 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+    `;
+
+    document.getElementById("addItemBtn").onclick = async () => {
+      const name = document.getElementById("itemName").value.trim();
+      const cost = Number(document.getElementById("itemCost").value || "0");
+      const desc = document.getElementById("itemDesc").value.trim();
+      if (!name) { alert("상품 이름을 입력하세요."); return; }
+      if (cost <= 0) { alert("가격은 1 이상이어야 합니다."); return; }
+      cls.storeItems.push({ id: randomId(6), name, cost, description: desc });
+      await saveData();
+      renderStoreDetail(classId);
+    };
+
+    area.querySelectorAll(".delItemBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const idx = Number(btn.dataset.idx);
+        cls.storeItems.splice(idx, 1);
+        await saveData();
+        renderStoreDetail(classId);
+      };
+    });
+  }
+
+  // ----- 교사: 요청 승인 -----
+  function renderTeacherRequests() {
+    const content = document.getElementById("content");
+    const classOptions = (appData.classes || []).map(c => `<option value="${c.id}">${c.name} (${c.id})</option>`).join("");
+    content.innerHTML = `
+      <div class="card">
+        <h3>학급 선택</h3>
+        <label>학급
+          <select id="reqClassSelect">
+            <option value="">-- 학급 선택 --</option>
+            ${classOptions}
+          </select>
+        </label>
+        <div id="reqDetailArea" style="margin-top:10px;"></div>
+      </div>
+    `;
+    document.getElementById("reqClassSelect").onchange = () => {
+      const classId = document.getElementById("reqClassSelect").value;
+      renderRequestsDetail(classId);
+    };
+  }
+
+  async function renderRequestsDetail(classId) {
+    const area = document.getElementById("reqDetailArea");
+    if (!classId) { area.innerHTML = ""; return; }
+    const cls = findClassById(classId);
+    if (!cls) { area.innerHTML = "<p>학급을 찾을 수 없습니다.</p>"; return; }
+
+    cls.pointRequests ??= [];
+    cls.storeRequests ??= [];
+    cls.logs ??= [];
+
+    const prRows = cls.pointRequests.map((r, idx) => {
+      const stu = cls.students.find(s => s.id === r.targetStudentId);
+      const statusBadge = r.status === "pending" ? "badge-pending"
+                        : r.status === "approved" ? "badge-approved" : "badge-rejected";
+      return `
+        <tr>
+          <td>${stu ? stu.name : "삭제됨"}</td>
+          <td>${r.type === "reward" ? "상점" : "벌점"}</td>
+          <td>${r.ruleName || ""}</td>
+          <td>${r.points}</td>
+          <td>${r.reason || ""}</td>
+          <td>${r.requesterName || ""}</td>
+          <td>${r.firstApprovedBy ? r.firstApprovedBy : "-"}</td>
+          <td><span class="badge ${statusBadge}">${r.status}</span></td>
+          <td>${formatDateTime(r.createdAt)}</td>
+          <td>
+            ${r.status === "pending"
+              ? `<button data-idx="${idx}" class="approvePointBtn">승인</button>
+                 <button data-idx="${idx}" class="rejectPointBtn">반려</button>`
+              : ""}
+          </td>
+        </tr>
+      `;
+    }).join("");
+
+    const srRows = cls.storeRequests.map((r, idx) => {
+      const stu = cls.students.find(s => s.id === r.studentId);
+      const item = cls.storeItems.find(i => i.id === r.itemId);
+      const statusBadge = r.status === "pending" ? "badge-pending"
+                        : r.status === "approved" ? "badge-approved" : "badge-rejected";
+      return `
+        <tr>
+          <td>${stu ? stu.name : "삭제됨"}</td>
+          <td>${item ? item.name : "삭제된 상품"}</td>
+          <td>${item ? item.cost : "-"}</td>
+          <td>${r.reason || ""}</td>
+          <td><span class="badge ${statusBadge}">${r.status}</span></td>
+          <td>${formatDateTime(r.createdAt)}</td>
+          <td>
+            ${r.status === "pending"
+              ? `<button data-idx="${idx}" class="approveStoreBtn">승인</button>
+                 <button data-idx="${idx}" class="rejectStoreBtn">반려</button>`
+              : ""}
+          </td>
+        </tr>
+      `;
+    }).join("");
+
+    area.innerHTML = `
+      <div class="card">
+        <h4>상점·벌점 요청</h4>
+        <table>
+          <thead>
+            <tr>
+              <th>학생</th><th>종류</th><th>항목</th><th>점수</th><th>사유</th>
+              <th>요청자</th><th>1차 승인</th><th>상태</th><th>시간</th><th>관리</th>
+            </tr>
+          </thead>
+          <tbody>${prRows || '<tr><td colspan="10">요청이 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h4>스토어 구매 요청</h4>
+        <table>
+          <thead>
+            <tr>
+              <th>학생</th><th>상품</th><th>가격</th><th>비고</th><th>상태</th><th>시간</th><th>관리</th>
+            </tr>
+          </thead>
+          <tbody>${srRows || '<tr><td colspan="7">요청이 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+    `;
+
+    area.querySelectorAll(".approvePointBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const idx = Number(btn.dataset.idx);
+        const r = cls.pointRequests[idx];
+        if (!r || r.status !== "pending") return;
+        const stu = cls.students.find(s => s.id === r.targetStudentId);
+        if (stu) {
+          stu.points = (stu.points || 0) + r.points;
+          cls.logs.push({
+            type: "point",
+            targetStudentId: stu.id,
+            targetStudentName: stu.name,
+            points: r.points,
+            ruleName: r.ruleName,
+            reason: r.reason,
+            approvedBy: "담임",
+            createdAt: Date.now()
+          });
+        }
+        r.status = "approved";
+        await saveData();
+        renderRequestsDetail(classId);
+      };
+    });
+    area.querySelectorAll(".rejectPointBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const idx = Number(btn.dataset.idx);
+        const r = cls.pointRequests[idx];
+        if (!r || r.status !== "pending") return;
+        r.status = "rejected";
+        await saveData();
+        renderRequestsDetail(classId);
+      };
+    });
+
+    area.querySelectorAll(".approveStoreBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const idx = Number(btn.dataset.idx);
+        const r = cls.storeRequests[idx];
+        if (!r || r.status !== "pending") return;
+        const stu = cls.students.find(s => s.id === r.studentId);
+        const item = cls.storeItems.find(i => i.id === r.itemId);
+        if (!stu || !item) {
+          alert("학생 또는 상품 정보가 없습니다.");
+          return;
+        }
+        if ((stu.points || 0) < item.cost) {
+          if (!confirm("상점이 부족합니다. 그래도 승인하겠습니까? (마이너스 가능)")) return;
+        }
+        stu.points = (stu.points || 0) - item.cost;
+        r.status = "approved";
+        cls.logs.push({
+          type: "store",
+          studentId: stu.id,
+          studentName: stu.name,
+          itemName: item.name,
+          cost: item.cost,
+          createdAt: Date.now()
+        });
+        await saveData();
+        renderRequestsDetail(classId);
+      };
+    });
+    area.querySelectorAll(".rejectStoreBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const idx = Number(btn.dataset.idx);
+        const r = cls.storeRequests[idx];
+        if (!r || r.status !== "pending") return;
+        r.status = "rejected";
+        await saveData();
+        renderRequestsDetail(classId);
+      };
+    });
+  }
+
+  // ----- 교사: 통계/로그 -----
+  function renderTeacherStats() {
+    const content = document.getElementById("content");
+    const classOptions = (appData.classes || []).map(c => `<option value="${c.id}">${c.name} (${c.id})</option>`).join("");
+    content.innerHTML = `
+      <div class="card">
+        <h3>학급 선택</h3>
+        <label>학급
+          <select id="statsClassSelect">
+            <option value="">-- 학급 선택 --</option>
+            ${classOptions}
+          </select>
+        </label>
+        <div id="statsDetailArea" style="margin-top:10px;"></div>
+      </div>
+    `;
+    document.getElementById("statsClassSelect").onchange = () => {
+      const classId = document.getElementById("statsClassSelect").value;
+      renderStatsDetail(classId);
+    };
+  }
+
+  function renderStatsDetail(classId) {
+    const area = document.getElementById("statsDetailArea");
+    if (!classId) { area.innerHTML = ""; return; }
+    const cls = findClassById(classId);
+    if (!cls) { area.innerHTML = "<p>학급을 찾을 수 없습니다.</p>"; return; }
+
+    cls.students ??= [];
+    cls.logs ??= [];
+
+    const ranked = [...cls.students].sort((a,b) => (b.points||0) - (a.points||0));
+    const rankRows = ranked.map((s, idx) => `
+      <tr>
+        <td>${idx+1}</td>
+        <td>${s.name}</td>
+        <td>${s.id}</td>
+        <td>${s.points || 0}</td>
+      </tr>
+    `).join("");
+
+    const logRows = cls.logs.slice().reverse().map(l => {
+      if (l.type === "point") {
+        return `
+          <tr>
+            <td>${formatDateTime(l.createdAt)}</td>
+            <td>${l.targetStudentName}</td>
+            <td>${l.points}</td>
+            <td>${l.ruleName || ""}</td>
+            <td>${l.reason || ""}</td>
+          </tr>
+        `;
+      } else {
+        return `
+          <tr>
+            <td>${formatDateTime(l.createdAt)}</td>
+            <td>${l.studentName}</td>
+            <td>스토어</td>
+            <td>${l.itemName} (${l.cost})</td>
+            <td>-</td>
+          </tr>
+        `;
+      }
+    }).join("");
+
+    area.innerHTML = `
+      <div class="card">
+        <h4>상점 랭킹</h4>
+        <table>
+          <thead><tr><th>순위</th><th>이름</th><th>아이디</th><th>상점</th></tr></thead>
+          <tbody>${rankRows || '<tr><td colspan="4">학생이 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h4>행동 / 스토어 로그</h4>
+        <table>
+          <thead><tr><th>시간</th><th>학생</th><th>변화</th><th>내용</th><th>비고</th></tr></thead>
+          <tbody>${logRows || '<tr><td colspan="5">로그가 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  // =========================
+  // 학생용 앱
+  // =========================
+  function renderStudentApp(activeTab = "request") {
+    const cls = findClassById(currentUser.classId);
+    const stu = cls.students.find(s => s.id === currentUser.studentId);
+
+    const userBar = document.getElementById("userBar");
+    userBar.innerHTML = `
+      <div class="row">
+        <div><strong>역할:</strong> 학생 (${stu.name})</div>
+        <div><span class="tag">학급: ${cls.name}</span></div>
+        <div><span class="tag">현재 상점: ${stu.points || 0}</span></div>
+        <div style="text-align:right;">
+          <button id="logoutBtn">로그아웃</button>
+        </div>
+      </div>
+      <div class="tag">
+        ${stu.isPointManager ? "상점관리자 / " : ""}
+        ${stu.isAnnounceManager ? "발표관리 / " : ""}
+        ${stu.isGlobalRequester ? "전체 학생 상점·벌점 요청 가능" : ""}
+      </div>
+    `;
+    document.getElementById("logoutBtn").onclick = () => {
+      currentUser = null;
+      document.getElementById("appView").style.display = "none";
+      document.getElementById("loginView").style.display = "block";
+      renderLoginView();
+    };
+
+    const navBar = document.getElementById("navBar");
+    navBar.innerHTML = `
+      <button data-tab="request"${activeTab==="request"?" style='font-weight:bold;'":""}>상점·벌점 요청</button>
+      <button data-tab="store"${activeTab==="store"?" style='font-weight:bold;'":""}>스토어</button>
+      ${stu.isPointManager ? `<button data-tab="pm"${activeTab==="pm"?" style='font-weight:bold;'":""}>상점관리자 승인</button>` : ""}
+      ${stu.isAnnounceManager ? `<button data-tab="announce"${activeTab==="announce"?" style='font-weight:bold;'":""}>발표 관리</button>` : ""}
+      <button data-tab="history"${activeTab==="history"?" style='font-weight:bold;'":""}>내 기록</button>
+    `;
+    Array.from(navBar.querySelectorAll("button")).forEach(btn => {
+      btn.onclick = () => {
+        renderStudentApp(btn.dataset.tab);
+      };
+    });
+
+    if (activeTab === "request") renderStudentRequestTab();
+    else if (activeTab === "store") renderStudentStoreTab();
+    else if (activeTab === "pm" && stu.isPointManager) renderStudentPMTab();
+    else if (activeTab === "announce" && stu.isAnnounceManager) renderStudentAnnounceTab();
+    else if (activeTab === "history") renderStudentHistoryTab();
+  }
+
+  // ----- 학생: 상점·벌점 요청 -----
+  function renderStudentRequestTab() {
+    const content = document.getElementById("content");
+    const cls = findClassById(currentUser.classId);
+    const me = cls.students.find(s => s.id === currentUser.studentId);
+
+    cls.rules ??= [];
+    cls.penalties ??= [];
+    cls.pointRequests ??= [];
+
+    const rewardOptions = cls.rules.map(r => `<option value="${r.id}">${r.name} (${r.points})</option>`).join("");
+    const penaltyOptions = cls.penalties.map(r => `<option value="${r.id}">${r.name} (${r.points})</option>`).join("");
+    const studentOptions = cls.students.map(s => `<option value="${s.id}">${s.name}</option>`).join("");
+
+    content.innerHTML = `
+      <div class="card">
+        <h3>상점·벌점 요청</h3>
+        <p class="tag">※ 담임선생님 승인 후 상점/벌점이 반영됩니다.</p>
+        <div class="row">
+          <div>
+            <label>요청 종류
+              <select id="reqTypeSelect">
+                <option value="reward">상점</option>
+                <option value="penalty">벌점</option>
+              </select>
+            </label>
+          </div>
+          <div id="ruleSelectAreaReward">
+            <label>상점 항목
+              <select id="rewardSelect">
+                ${rewardOptions}
+              </select>
+            </label>
+          </div>
+          <div id="ruleSelectAreaPenalty" style="display:none;">
+            <label>벌점 항목
+              <select id="penaltySelect">
+                ${penaltyOptions}
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px;">
+          <div>
+            <label>대상 학생
+              <select id="targetStudentSelect" ${me.isGlobalRequester ? "" : "disabled"}>
+                <option value="${me.id}">${me.name} (본인)</option>
+                ${me.isGlobalRequester ? studentOptions : ""}
+              </select>
+            </label>
+            ${me.isGlobalRequester ? '<p class="tag">※ 전체 학생 상점·벌점 요청 권한이 있습니다.</p>' : '<p class="tag">※ 본인에 대해서만 요청할 수 있습니다.</p>'}
+          </div>
+        </div>
+        <label>사유(선택)
+          <textarea id="reqReason" rows="2" placeholder="예: 청소구역 정리 정돈을 끝까지 책임짐"></textarea>
+        </label>
+        <button id="submitPointReqBtn" style="margin-top:8px;">요청 보내기</button>
+      </div>
+      <div class="card">
+        <h4>내가 보낸 요청 내역</h4>
+        <div id="myReqListArea"></div>
+      </div>
+    `;
+
+    const reqTypeSelect = document.getElementById("reqTypeSelect");
+    reqTypeSelect.onchange = () => {
+      const v = reqTypeSelect.value;
+      document.getElementById("ruleSelectAreaReward").style.display = v === "reward" ? "block" : "none";
+      document.getElementById("ruleSelectAreaPenalty").style.display = v === "penalty" ? "block" : "none";
+    };
+
+    document.getElementById("submitPointReqBtn").onclick = async () => {
+      const type = document.getElementById("reqTypeSelect").value;
+      const reason = document.getElementById("reqReason").value.trim();
+      const targetId = document.getElementById("targetStudentSelect").value || me.id;
+
+      let rule;
+      if (type === "reward") {
+        const rid = document.getElementById("rewardSelect").value;
+        rule = cls.rules.find(r => r.id === rid);
+      } else {
+        const rid = document.getElementById("penaltySelect").value;
+        rule = cls.penalties.find(r => r.id === rid);
+      }
+      if (!rule) { alert("항목을 선택하세요."); return; }
+
+      cls.pointRequests.push({
+        id: randomId(8),
+        type,
+        targetStudentId: targetId,
+        ruleId: rule.id,
+        ruleName: rule.name,
+        points: rule.points,
+        reason,
+        requesterId: me.id,
+        requesterName: me.name,
+        firstApprovedBy: null,
+        status: "pending",
+        createdAt: Date.now()
+      });
+      await saveData();
+      alert("요청이 전송되었습니다.");
+      renderStudentApp("request");
+    };
+
+    renderMyRequestList();
+  }
+
+  function renderMyRequestList() {
+    const area = document.getElementById("myReqListArea");
+    const cls = findClassById(currentUser.classId);
+    const me = cls.students.find(s => s.id === currentUser.studentId);
+    const myReq = (cls.pointRequests || []).filter(r => r.requesterId === me.id);
+
+    const rows = myReq.slice().reverse().map(r => {
+      const statusBadge = r.status === "pending" ? "badge-pending"
+                        : r.status === "approved" ? "badge-approved" : "badge-rejected";
+      const tar = cls.students.find(s => s.id === r.targetStudentId);
+      return `
+        <tr>
+          <td>${tar ? tar.name : "삭제됨"}</td>
+          <td>${r.type === "reward" ? "상점" : "벌점"}</td>
+          <td>${r.ruleName}</td>
+          <td>${r.points}</td>
+          <td>${r.reason || ""}</td>
+          <td>${r.firstApprovedBy || "-"}</td>
+          <td><span class="badge ${statusBadge}">${r.status}</span></td>
+          <td>${formatDateTime(r.createdAt)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    area.innerHTML = `
+      <table>
+        <thead>
+          <tr>
+            <th>대상</th><th>종류</th><th>항목</th><th>점수</th><th>사유</th><th>1차 승인</th><th>상태</th><th>시간</th>
+          </tr>
+        </thead>
+        <tbody>${rows || '<tr><td colspan="8">보낸 요청이 없습니다.</td></tr>'}</tbody>
+      </table>
+    `;
+  }
+
+  // ----- 학생: 스토어 -----
+  function renderStudentStoreTab() {
+    const content = document.getElementById("content");
+    const cls = findClassById(currentUser.classId);
+    const me = cls.students.find(s => s.id === currentUser.studentId);
+
+    cls.storeItems ??= [];
+    cls.storeRequests ??= [];
+
+    const items = cls.storeItems.map(it => `
+      <tr>
+        <td>${it.name}</td>
+        <td>${it.cost}</td>
+        <td>${it.description || ""}</td>
+        <td><button data-id="${it.id}" class="buyItemBtn">구매 요청</button></td>
+      </tr>
+    `).join("");
+
+    const myReq = cls.storeRequests.filter(r => r.studentId === me.id);
+    const reqRows = myReq.slice().reverse().map(r => {
+      const item = cls.storeItems.find(i => i.id === r.itemId);
+      const statusBadge = r.status === "pending" ? "badge-pending"
+                        : r.status === "approved" ? "badge-approved" : "badge-rejected";
+      return `
+        <tr>
+          <td>${item ? item.name : "삭제된 상품"}</td>
+          <td>${item ? item.cost : "-"}</td>
+          <td>${r.reason || ""}</td>
+          <td><span class="badge ${statusBadge}">${r.status}</span></td>
+          <td>${formatDateTime(r.createdAt)}</td>
+        </tr>
+      `;
+    }).join("");
+
+    content.innerHTML = `
+      <div class="card">
+        <h3>스토어 상품</h3>
+        <p class="tag">※ 구매 요청 후 담임 승인 시 상점이 차감됩니다.</p>
+        <table>
+          <thead><tr><th>상품</th><th>가격</th><th>설명</th><th>요청</th></tr></thead>
+          <tbody>${items || '<tr><td colspan="4">등록된 상품이 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+      <div class="card">
+        <h4>내 스토어 구매 요청</h4>
+        <table>
+          <thead><tr><th>상품</th><th>가격</th><th>비고</th><th>상태</th><th>시간</th></tr></thead>
+          <tbody>${reqRows || '<tr><td colspan="5">구매 요청이 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+    `;
+
+    content.querySelectorAll(".buyItemBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const itemId = btn.dataset.id;
+        const reason = prompt("구매 이유나 사용 날짜 등을 적어주세요. (생략 가능)");
+        cls.storeRequests.push({
+          id: randomId(8),
+          studentId: me.id,
+          itemId,
+          reason: reason || "",
+          status: "pending",
+          createdAt: Date.now()
+        });
+        await saveData();
+        alert("구매 요청이 전송되었습니다.");
+        renderStudentApp("store");
+      };
+    });
+  }
+
+  // ----- 학생: 상점관리자 -----
+  function renderStudentPMTab() {
+    const content = document.getElementById("content");
+    const cls = findClassById(currentUser.classId);
+    const me = cls.students.find(s => s.id === currentUser.studentId);
+
+    cls.pointRequests ??= [];
+
+    const pending = cls.pointRequests.filter(r => r.status === "pending" && !r.firstApprovedBy);
+    const rows = pending.map((r, idx) => {
+      const stu = cls.students.find(s => s.id === r.targetStudentId);
+      return `
+        <tr>
+          <td>${stu ? stu.name : "삭제됨"}</td>
+          <td>${r.type === "reward" ? "상점" : "벌점"}</td>
+          <td>${r.ruleName}</td>
+          <td>${r.points}</td>
+          <td>${r.reason || ""}</td>
+          <td>${r.requesterName}</td>
+          <td>${formatDateTime(r.createdAt)}</td>
+          <td>
+            <button data-id="${r.id}" class="pmApproveBtn">1차 승인</button>
+            <button data-id="${r.id}" class="pmRejectBtn">반려</button>
+          </td>
+        </tr>
+      `;
+    }).join("");
+
+    content.innerHTML = `
+      <div class="card">
+        <h3>상점관리자 1차 승인</h3>
+        <p class="tag">※ 여기서 1차 승인하면, 담임선생님이 최종 승인/반려합니다.</p>
+        <table>
+          <thead>
+            <tr>
+              <th>학생</th><th>종류</th><th>항목</th><th>점수</th><th>사유</th><th>요청자</th><th>시간</th><th>관리</th>
+            </tr>
+          </thead>
+          <tbody>${rows || '<tr><td colspan="8">대기 중인 요청이 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+    `;
+
+    content.querySelectorAll(".pmApproveBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const id = btn.dataset.id;
+        const r = cls.pointRequests.find(x => x.id === id);
+        if (!r || r.status !== "pending") return;
+        r.firstApprovedBy = me.name;
+        await saveData();
+        renderStudentApp("pm");
+      };
+    });
+    content.querySelectorAll(".pmRejectBtn").forEach(btn => {
+      btn.onclick = async () => {
+        const id = btn.dataset.id;
+        const r = cls.pointRequests.find(x => x.id === id);
+        if (!r || r.status !== "pending") return;
+        r.status = "rejected";
+        r.firstApprovedBy = me.name + "(반려)";
+        await saveData();
+        renderStudentApp("pm");
+      };
+    });
+  }
+
+  // ----- 학생: 발표관리 -----
+  function renderStudentAnnounceTab() {
+    const content = document.getElementById("content");
+    const cls = findClassById(currentUser.classId);
+    const me = cls.students.find(s => s.id === currentUser.studentId);
+
+    cls.pointRequests ??= [];
+
+    const studentOptions = cls.students.map(s => `<option value="${s.id}">${s.name}</option>`).join("");
+
+    content.innerHTML = `
+      <div class="card">
+        <h3>발표 횟수 기록 & 상점 요청</h3>
+        <p class="tag">※ 발표관리 학생은 친구들의 발표를 기록하고 상점 요청을 대신 보낼 수 있습니다.</p>
+        <div class="row">
+          <div>
+            <label>발표한 학생
+              <select id="announceStudentSelect">
+                ${studentOptions}
+              </select>
+            </label>
+          </div>
+          <div>
+            <label>발표로 줄 상점(점수)
+              <input type="number" id="announcePoints" value="1" />
+            </label>
+          </div>
+        </div>
+        <label>비고(어떤 발표였는지)
+          <textarea id="announceReason" rows="2" placeholder="예: 수학 시간에 어려운 문제를 스스로 풀이 설명"></textarea>
+        </label>
+        <button id="announceSubmitBtn" style="margin-top:8px;">발표 상점 요청 보내기</button>
+      </div>
+    `;
+
+    document.getElementById("announceSubmitBtn").onclick = async () => {
+      const targetId = document.getElementById("announceStudentSelect").value;
+      const points = Number(document.getElementById("announcePoints").value || "0");
+      const reason = document.getElementById("announceReason").value.trim();
+      if (!targetId) { alert("학생을 선택하세요."); return; }
+      if (!points) { alert("점수를 입력하세요."); return; }
+
+      const tarStu = cls.students.find(s => s.id === targetId);
+      cls.pointRequests.push({
+        id: randomId(8),
+        type: "reward",
+        targetStudentId: targetId,
+        ruleId: null,
+        ruleName: "발표 상점",
+        points,
+        reason,
+        requesterId: me.id,
+        requesterName: me.name + "(발표관리)",
+        firstApprovedBy: null,
+        status: "pending",
+        createdAt: Date.now()
+      });
+      await saveData();
+      alert("발표 상점 요청이 전송되었습니다.");
+      renderStudentApp("announce");
+    };
+  }
+
+  // ----- 학생: 내 기록 -----
+  function renderStudentHistoryTab() {
+    const content = document.getElementById("content");
+    const cls = findClassById(currentUser.classId);
+    const me = cls.students.find(s => s.id === currentUser.studentId);
+
+    cls.logs ??= [];
+
+    const myLogs = cls.logs.filter(l =>
+      (l.type === "point" && l.targetStudentId === me.id) ||
+      (l.type === "store" && l.studentId === me.id)
+    );
+    const logRows = myLogs.slice().reverse().map(l => {
+      if (l.type === "point") {
+        return `
+          <tr>
+            <td>${formatDateTime(l.createdAt)}</td>
+            <td>${l.points}</td>
+            <td>${l.ruleName || ""}</td>
+            <td>${l.reason || ""}</td>
+          </tr>
+        `;
+      } else {
+        return `
+          <tr>
+            <td>${formatDateTime(l.createdAt)}</td>
+            <td>- ${l.cost}</td>
+            <td>스토어: ${l.itemName}</td>
+            <td>-</td>
+          </tr>
+        `;
+      }
+    }).join("");
+
+    content.innerHTML = `
+      <div class="card">
+        <h3>내 상점/벌점 기록</h3>
+        <p class="tag">※ 현재 상점: ${me.points || 0}</p>
+        <table>
+          <thead><tr><th>시간</th><th>변화</th><th>내용</th><th>비고</th></tr></thead>
+          <tbody>${logRows || '<tr><td colspan="4">아직 기록이 없습니다.</td></tr>'}</tbody>
+        </table>
+      </div>
+    `;
+  }
+</script>
+</body>
+</html>
