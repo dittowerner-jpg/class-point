@@ -84,7 +84,8 @@ function formatDateTime(ts) {
 // =========================
 async function loadData() {
   try {
-    const res = await fetch(WEBAPP_URL + "?t=" + Date.now());
+    // mode=get 으로 데이터 읽기
+    const res = await fetch(WEBAPP_URL + "?mode=get&t=" + Date.now());
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
     appData = (data && typeof data === "object") ? data : {};
@@ -92,22 +93,34 @@ async function loadData() {
     console.error("loadData 실패:", e);
     appData = {};
   }
+
   // 기본값 보정
   appData.teacherPassword ??= "teacher1234";
   appData.classes ??= [];
 }
 
+
 async function saveData() {
   try {
-    await fetch(WEBAPP_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(appData)
-    });
+    const jsonStr = JSON.stringify(appData);
+    const url =
+      WEBAPP_URL +
+      "?mode=save&data=" +
+      encodeURIComponent(jsonStr) +
+      "&t=" +
+      Date.now();
+
+    const res = await fetch(url);
+    if (!res.ok) {
+      const text = await res.text();
+      alert("저장 실패: HTTP " + res.status + "\n" + text);
+    }
   } catch (e) {
+    alert("저장 중 오류가 발생했습니다: " + e.message);
     console.error("saveData 실패:", e);
   }
 }
+
 
 // =========================
 // 초기 진입
@@ -1335,5 +1348,6 @@ function renderStudentHistoryTab() {
 </script>
 </body>
 </html>
+
 
 
